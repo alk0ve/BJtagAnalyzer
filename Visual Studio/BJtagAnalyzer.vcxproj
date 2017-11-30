@@ -18,6 +18,20 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\source\BJtagAnalyzer.cpp" />
+    <ClCompile Include="..\source\BJtagAnalyzerResults.cpp" />
+    <ClCompile Include="..\source\BJtagAnalyzerSettings.cpp" />
+    <ClCompile Include="..\source\BJtagSimulationDataGenerator.cpp" />
+    <ClCompile Include="..\source\BJtagTypes.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\source\BJtagAnalyzer.h" />
+    <ClInclude Include="..\source\BJtagAnalyzerResults.h" />
+    <ClInclude Include="..\source\BJtagAnalyzerSettings.h" />
+    <ClInclude Include="..\source\BJtagSimulationDataGenerator.h" />
+    <ClInclude Include="..\source\BJtagTypes.h" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{D7556E7E-A6BF-4BCE-BDC8-E66D2874C301}</ProjectGuid>
     <RootNamespace>BJtagAnalyzer</RootNamespace>
@@ -168,18 +182,6 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="..\Source\BJtagAnalyzer.cpp" />
-    <ClCompile Include="..\Source\BJtagAnalyzerResults.cpp" />
-    <ClCompile Include="..\Source\BJtagAnalyzerSettings.cpp" />
-    <ClCompile Include="..\Source\BJtagSimulationDataGenerator.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="..\Source\BJtagAnalyzer.h" />
-    <ClInclude Include="..\Source\BJtagAnalyzerResults.h" />
-    <ClInclude Include="..\Source\BJtagAnalyzerSettings.h" />
-    <ClInclude Include="..\Source\BJtagSimulationDataGenerator.h" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

@@ -1,13 +1,14 @@
-#include "BJtagAnalyzer.h"
-#include "BJtagAnalyzerSettings.h"
 #include <AnalyzerChannelData.h>
 
+#include <algorithm>
+
+#include "BJtagAnalyzer.h"
+#include "BJtagAnalyzerSettings.h"
+
 BJtagAnalyzer::BJtagAnalyzer()
-:	Analyzer2(),  
-	mSettings( new BJtagAnalyzerSettings() ),
-	mSimulationInitilized( false )
+:	mSimulationInitilized(false)
 {
-	SetAnalyzerSettings( mSettings.get() );
+	SetAnalyzerSettings(&mSettings);
 }
 
 BJtagAnalyzer::~BJtagAnalyzer()
@@ -15,87 +16,204 @@ BJtagAnalyzer::~BJtagAnalyzer()
 	KillThread();
 }
 
-void BJtagAnalyzer::SetupResults()
+void BJtagAnalyzer::SyncToSample(U64 to_sample)
 {
-	mResults.reset( new BJtagAnalyzerResults( this, mSettings.get() ) );
-	SetAnalyzerResults( mResults.get() );
-	mResults->AddChannelBubblesWillAppearOn( mSettings->mInputChannel );
+	mTms->AdvanceToAbsPosition(to_sample);
+	mTck->AdvanceToAbsPosition(to_sample);
+	if (mTdi != NULL)
+		mTdi->AdvanceToAbsPosition(to_sample);
+	if (mTdo != NULL)
+		mTdo->AdvanceToAbsPosition(to_sample);
+	if (mTrst != NULL)
+		mTrst->AdvanceToAbsPosition(to_sample);
+}
+
+void BJtagAnalyzer::AdvanceTck(Frame& frm, BJtagShiftedData& shifted_data)
+{
+	if (mTrst != NULL
+				&&  mTrst->WouldAdvancingToAbsPositionCauseTransition(mTck->GetSampleOfNextEdge()))
+	{
+		mTrst->AdvanceToNextEdge();
+
+		// close the frame and add it
+		CloseFrame(frm, shifted_data, mTrst->GetSampleNumber());
+
+		// reset the TAP state
+		mTAPCtrl.SetState(TestLogicReset);
+
+		// prepare the reset frame
+		frm.mStartingSampleInclusive = mTrst->GetSampleNumber() + 1;
+		frm.mType = mTAPCtrl.GetCurrState();
+
+		// find the rising edge of TRST
+		mTrst->AdvanceToNextEdge();
+
+		// bring TCK here too
+		mTck->AdvanceToAbsPosition(mTrst->GetSampleNumber());
+	} else {
+		mTck->AdvanceToNextEdge();
+	}
+}
+
+void BJtagAnalyzer::Setup()
+{	
+    // get the channel data pointers
+	mTms = GetAnalyzerChannelData(mSettings.mTmsChannel);
+	mTck = GetAnalyzerChannelData(mSettings.mTckChannel);
+	if (mSettings.mTdiChannel != UNDEFINED_CHANNEL)
+		mTdi = GetAnalyzerChannelData(mSettings.mTdiChannel);
+	else
+		mTdi = NULL;
+
+	if (mSettings.mTdoChannel != UNDEFINED_CHANNEL)
+		mTdo = GetAnalyzerChannelData(mSettings.mTdoChannel);
+	else
+		mTdo = NULL;
+
+	if (mSettings.mTrstChannel != UNDEFINED_CHANNEL)
+		mTrst = GetAnalyzerChannelData(mSettings.mTrstChannel);
+	else
+		mTrst = NULL;
+}
+
+void BJtagAnalyzer::CloseFrame(Frame& frm, BJtagShiftedData& shifted_data, U64 ending_sample_number)
+{
+	// save the TDI/TDO values in the frame
+	if (frm.mType == ShiftIR  ||  frm.mType == ShiftDR)
+	{
+		// mind the bit order
+		if ((frm.mType == ShiftIR  &&  mSettings.mInstructRegBitOrder == LSB_First)
+				|| (frm.mType == ShiftDR  &&  mSettings.mDataRegBitOrder == LSB_First))
+		{
+			std::reverse(shifted_data.mTdiBits.begin(), shifted_data.mTdiBits.end());
+			std::reverse(shifted_data.mTdoBits.begin(), shifted_data.mTdoBits.end());
+		}
+
+		mResults->AddShiftedData(shifted_data);
+
+		shifted_data.mTdiBits.clear();
+		shifted_data.mTdoBits.clear();
+	}
+
+	frm.mEndingSampleInclusive = ending_sample_number;
+	mResults->AddFrame(frm);
 }
 
 void BJtagAnalyzer::WorkerThread()
 {
-	mSampleRateHz = GetSampleRate();
+    Setup();
 
-	mSerial = GetAnalyzerChannelData( mSettings->mInputChannel );
-
-	if( mSerial->GetBitState() == BIT_LOW )
-		mSerial->AdvanceToNextEdge();
-
-	U32 samples_per_bit = mSampleRateHz / mSettings->mBitRate;
-	U32 samples_to_first_center_of_first_data_bit = U32( 1.5 * double( mSampleRateHz ) / double( mSettings->mBitRate ) );
-
-	for( ; ; )
+	// make sure that we enter the loop on TRST high (inactive)
+	if (mTrst != NULL  &&   mTrst->GetBitState() == BIT_LOW)
 	{
-		U8 data = 0;
-		U8 mask = 1 << 7;
-		
-		mSerial->AdvanceToNextEdge(); //falling edge -- beginning of the start bit
+		// since we started on a active TRST we'll
+		// ignore the initial state from the settings
+		mTAPCtrl.SetState(TestLogicReset);
 
-		U64 starting_sample = mSerial->GetSampleNumber();
+		// advance to the rising edge of TRST
+		mTrst->AdvanceToNextEdge();
+		SyncToSample(mTrst->GetSampleNumber());
+	} else {
+		mTAPCtrl.SetState(mSettings.mTAPInitialState);
+	}
 
-		mSerial->Advance( samples_to_first_center_of_first_data_bit );
+	Frame frm;
+	frm.mStartingSampleInclusive = mTck->GetSampleNumber();
+	frm.mType = mTAPCtrl.GetCurrState();
+	frm.mFlags = 0;
+	frm.mData1 = 0;
+	frm.mData2 = 0;
 
-		for( U32 i=0; i<8; i++ )
+	BJtagShiftedData shifted_data;
+
+	for (;;)
+	{
+		// advance TCK to the rising edge
+		AdvanceTck(frm, shifted_data);
+		if (mTck->GetBitState() == BIT_LOW)
+			AdvanceTck(frm, shifted_data);
+
+		// advance all other channels here too
+		SyncToSample(mTck->GetSampleNumber());
+
+		// mark the rising edge of TCK
+		mResults->AddMarker(mTck->GetSampleNumber(), AnalyzerResults::UpArrow, mSettings.mTckChannel);
+
+		// save TDI and TDO states markers and data
+		if (mTAPCtrl.GetCurrState() == ShiftIR  ||  mTAPCtrl.GetCurrState() == ShiftDR)
 		{
-			//let's put a dot exactly where we sample this bit:
-			mResults->AddMarker( mSerial->GetSampleNumber(), AnalyzerResults::Dot, mSettings->mInputChannel );
+			if (mTdi != NULL)
+			{
+				mResults->AddMarker(mTdi->GetSampleNumber(), (mTdi->GetBitState() == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero), mSettings.mTdiChannel);
+				shifted_data.mTdiBits.push_back(mTdi->GetBitState());
+			}
 
-			if( mSerial->GetBitState() == BIT_HIGH )
-				data |= mask;
-
-			mSerial->Advance( samples_per_bit );
-
-			mask = mask >> 1;
+			if (mTdo != NULL)
+			{
+				mResults->AddMarker(mTdo->GetSampleNumber(), (mTdo->GetBitState() == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero), mSettings.mTdoChannel);
+				shifted_data.mTdoBits.push_back(mTdo->GetBitState());
+			}
 		}
 
+		// send TMS state to the TAP state machine - returns true if state machine has changed
+		if (mTAPCtrl.AdvanceState(mTms->GetBitState()))
+		{
+			mResults->AddMarker(mTms->GetSampleNumber(), AnalyzerResults::Dot, mSettings.mTmsChannel);
 
-		//we have a byte to save. 
-		Frame frame;
-		frame.mData1 = data;
-		frame.mFlags = 0;
-		frame.mStartingSampleInclusive = starting_sample;
-		frame.mEndingSampleInclusive = mSerial->GetSampleNumber();
+			CloseFrame(frm, shifted_data, mTck->GetSampleNumber());
 
-		mResults->AddFrame( frame );
-		mResults->CommitResults();
-		ReportProgress( frame.mEndingSampleInclusive );
+			// prepare the next frame
+			frm.mStartingSampleInclusive = mTck->GetSampleNumber() + 1;
+			frm.mType = mTAPCtrl.GetCurrState();
+
+			shifted_data.mStartSampleIndex = frm.mStartingSampleInclusive;
+
+			mResults->CommitResults();
+		}
+
+		// update progress bar
+		ReportProgress(mTck->GetSampleNumber());
 	}
 }
 
 bool BJtagAnalyzer::NeedsRerun()
 {
-	return false;
+    return false;
 }
 
-U32 BJtagAnalyzer::GenerateSimulationData( U64 minimum_sample_index, U32 device_sample_rate, SimulationChannelDescriptor** simulation_channels )
+void BJtagAnalyzer::SetupResults()
 {
-	if( mSimulationInitilized == false )
+    mResults.reset(new BJtagAnalyzerResults(this, &mSettings));
+    SetAnalyzerResults(mResults.get());
+
+    // set which channels will carry bubbles
+    mResults->AddChannelBubblesWillAppearOn(mSettings.mTmsChannel);
+    if (mTdi != NULL)
+        mResults->AddChannelBubblesWillAppearOn(mSettings.mTdiChannel);
+    if (mTdo != NULL)
+        mResults->AddChannelBubblesWillAppearOn(mSettings.mTdoChannel);
+}
+
+U32 BJtagAnalyzer::GenerateSimulationData(U64 minimum_sample_index, U32 device_sample_rate, SimulationChannelDescriptor** simulation_channels)
+{
+	if (!mSimulationInitilized)
 	{
-		mSimulationDataGenerator.Initialize( GetSimulationSampleRate(), mSettings.get() );
+		mSimulationDataGenerator.Initialize(GetSimulationSampleRate(), &mSettings);
 		mSimulationInitilized = true;
 	}
 
-	return mSimulationDataGenerator.GenerateSimulationData( minimum_sample_index, device_sample_rate, simulation_channels );
+	return mSimulationDataGenerator.GenerateSimulationData(minimum_sample_index, device_sample_rate, simulation_channels);
 }
 
 U32 BJtagAnalyzer::GetMinimumSampleRateHz()
 {
-	return mSettings->mBitRate * 4;
+	// whatever
+	return 9600;
 }
 
 const char* BJtagAnalyzer::GetAnalyzerName() const
 {
-	return "Better JTAG";
+	return ::GetAnalyzerName();
 }
 
 const char* GetAnalyzerName()
@@ -108,7 +226,7 @@ Analyzer* CreateAnalyzer()
 	return new BJtagAnalyzer();
 }
 
-void DestroyAnalyzer( Analyzer* analyzer )
+void DestroyAnalyzer(Analyzer* analyzer)
 {
 	delete analyzer;
 }
