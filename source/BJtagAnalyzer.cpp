@@ -167,9 +167,10 @@ void BJtagAnalyzer::WorkerThread()
 			frm.mType = mTAPCtrl.GetCurrState();
 
 			shifted_data.mStartSampleIndex = frm.mStartingSampleInclusive;
-
-			mResults->CommitResults();
 		}
+
+		// commit all the changes
+		mResults->CommitResults();
 
 		// update progress bar
 		ReportProgress(mTck->GetSampleNumber());
